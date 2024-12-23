@@ -1,6 +1,6 @@
 # The Shallot Encryption Routing (TSER)
 
-The Shallot Encryption Routing is an attempt at copying [Tor](https://www.torproject.org) (albeit really _really_ badly).
+The Shallot Encryption Routing is an attempt at creating a software similar to [Tor](https://www.torproject.org) (albeit really _really_ badly).
 
 ## To Do
 

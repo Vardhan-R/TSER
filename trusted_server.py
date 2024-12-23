@@ -26,16 +26,21 @@ class MySubscribeCallback(SubscribeCallback):
         msg_lst = msg.split(' ')
         match msg_lst[0]:   # Action/Command
             case "Joined":
-                all_clients[msg_lst[1]] = None  # Store it as a string
+                if msg_lst[1] not in all_clients.keys():
+                    all_clients[msg_lst[1]] = None  # Store it as a string
             case "Left":
-                all_clients.pop(msg_lst[1])
+                try:
+                    all_clients.pop(msg_lst[1])
+                except KeyError:
+                    pass
             case "New_path":
                 ...
-            case "Sharing_public_key":
+            case "Sharing_basic_info":
                 sender = msg_lst[1]
-                public_key = rsa.PublicKey(*map(int, msg_lst[2:]))
-                all_clients[sender] = public_key
-        print(f"Trusted server {message.publisher}: {msg[:50]}")
+                client_listen_addr = msg_lst[2]
+                public_key = rsa.PublicKey(*map(int, msg_lst[3:]))
+                all_clients[sender] = types.SimpleNamespace(listen_addr=client_listen_addr, public_key=public_key)
+        print(f"Trusted server {message.publisher}: {msg[:100]}")
 
 def acceptWrapper(sock: socket.socket):
     conn, addr = sock.accept()  # Should be ready to read
@@ -62,28 +67,46 @@ def choose(collection: set, max_count: int, but: set):
     except ValueError:  # if len(rem) == 0
         return []
 
+def encryptData(data: bytes, public_key: rsa.PublicKey) -> bytes:
+    """
+    Encrypts the data using the public key and adds the TSER footer.
+    """
+
+    ciphertext = b""
+
+    # Encrypt
+    while data:
+        ciphertext += rsa.encrypt(data[:245], public_key)
+        data = data[245:]
+
+    # Add the TSER footer
+    ciphertext += b" TSER"
+
+    return ciphertext
+
 def generatePublishMessage(info: dict[str]) -> str | None:
     msg_to_publish = None
 
     match info["action"]:
         case "Joined":  # Client joined
-            client_host, client_port = info["sender"]
-            msg_to_publish = f"Joined {client_host}:{client_port}"
+            msg_to_publish = f"Joined {info["sender"]}"
         case "Left":    # Client left
-            client_host, client_port = info["sender"]
-            msg_to_publish = f"Left {client_host}:{client_port}"
+            msg_to_publish = f"Left {info["sender"]}"
 
     match info["command"]:
         case "Contact": # Client tried to contact another client
-            if info["response"] not in (b"Address not found", b"No intermediate nodes"):
+            if info["response"] not in (b"Address not found", b"No intermediate nodes", b"Error while generating reponse"):
                 sender = info["sender"]
-                chosen_intermediate_nodes = info["response"].decode()
+                response = info["response"].decode()
+                chosen_i_nodes_str, _ = response.split('|')
                 recipient = info["recipient"]
-                msg_to_publish = f"New_path {sender} {chosen_intermediate_nodes} {recipient}"
-        case "Sharing_public_key":  # Client's public key
+                msg_to_publish = f"New_path {sender} {chosen_i_nodes_str} {recipient}"
+                print(msg_to_publish)
+        case "Sharing_basic_info":  # Client's listening address and public key
             sender = info["sender"]
+            listen_addr = info["listening address"]
             public_key: rsa.PublicKey = info["public key"]
-            msg_to_publish = f"Sharing_public_key {sender} {public_key.n} {public_key.e}"
+            msg_to_publish = f"Sharing_basic_info {sender} {listen_addr} {public_key.n} {public_key.e}"
 
     return msg_to_publish
 
@@ -98,28 +121,38 @@ def generateResponse(recv_data: bytes, sender: str) -> dict[str]:
         match ret["command"]:
             case "Contact":
                 ret["recipient"] = msg_lst[1]   # As a string
-                all_client_addrs = all_clients.keys()
-                if ret["recipient"] in all_client_addrs:
-                    intermediate_nodes = set(all_client_addrs)
-                    print(intermediate_nodes)
-                    chosen_intermediate_nodes = choose(intermediate_nodes, 3, {sender, ret["recipient"]})  # Choose at most 3 intermediate nodes
-                    if len(chosen_intermediate_nodes) == 0: # No intermediate nodes
-                        ret["response"] = b"No intermediate nodes"
-                    else:
-                        public_keys = [f"{all_clients[node].n},{all_clients[node].e}" for node in chosen_intermediate_nodes]
-                        ret["response"] = f"{' '.join(chosen_intermediate_nodes)}|{' '.join(public_keys)}".encode()
+                for k, v in all_clients.items():
+                    if v is not None:
+                        if ret["recipient"] == v.listen_addr:
+                            recipient_comm_addr = k
+                            intermediate_nodes = {k for k in all_clients.keys() if all_clients[k] is not None}
+                            # intermediate_nodes = set(all_client_addrs)
+                            # print(intermediate_nodes)
+                            chosen_intermediate_nodes = choose(intermediate_nodes, 3, {sender, recipient_comm_addr})    # Choose at most 3 intermediate nodes
+                            if len(chosen_intermediate_nodes) == 0: # No intermediate nodes
+                                ret["response"] = b"No intermediate nodes"
+                            else:
+                                i_nodes_listen_addrs = [all_clients[node].listen_addr for node in chosen_intermediate_nodes]
+                                public_keys = [f"{all_clients[node].public_key.n},{all_clients[node].public_key.e}" for node in chosen_intermediate_nodes]
+                                ret["response"] = f"{' '.join(i_nodes_listen_addrs)}|{' '.join(public_keys)}".encode()
+                            break
                 else:   # Address not found
                     ret["response"] = b"Address not found"
-            case "Sharing_public_key":  # "Sharing_public_key {n} {e}"
-                public_key = rsa.PublicKey(*map(int, msg_lst[1:]))
-                all_clients[sender] = public_key
+            case "Sharing_basic_info":  # "Sharing_basic_info {listen_host}:{listen_port} {n} {e}"
+                ret["listening address"] = msg_lst[1]
+                public_key = rsa.PublicKey(*map(int, msg_lst[2:]))
+                all_clients[sender] = types.SimpleNamespace(listen_addr=msg_lst[1], public_key=public_key)
+                # print("Here:", all_clients[sender])
                 ret["public key"] = public_key
-                ret["response"] = b"Received public key"
+                ret["response"] = b"Received basic info"
             case _:
                 ret["response"] = f"Command not found: {ret["command"]}".encode()
     except Exception as e:
-        ret["response"] = str(e).encode()
+        print("Exception here:", e)
+        # ret["response"] = str(e).encode()
+        ret["response"] = b"Error while generating reponse"
 
+    print('ret["response"]:', ret["response"])
     return ret
 
 def lineToAddress(line: str) -> tuple[str, int]:
@@ -148,12 +181,18 @@ def serviceConnection(key: selectors.SelectorKey, mask) -> dict[str]:
             res = generateResponse(recv_data, ret["sender"])
             ret["command"] = res["command"]
             ret["response"] = res["response"]
-            data.outb += ret["response"]
+
+            # Try to encrypt the response to be sent
+            if all_clients[ret["sender"]] is None:  # The client's basic info is set to `None`
+                data.outb += ret["response"] + b" TSER"
+            else:   # The client's basic info is known
+                data.outb += encryptData(ret["response"], all_clients[ret["sender"]].public_key)
 
             match ret["command"]:
                 case "Contact":
                     ret["recipient"] = res["recipient"]
-                case "Sharing_public_key":
+                case "Sharing_basic_info":
+                    ret["listening address"] = res["listening address"]
                     ret["public key"] = res["public key"]
         else:
             print(f"Closing connection to {data.addr}")
@@ -163,10 +202,18 @@ def serviceConnection(key: selectors.SelectorKey, mask) -> dict[str]:
 
     if mask & selectors.EVENT_WRITE:
         if data.outb:
-            print(f"Sending {data.outb!r} to {data.addr}")
-            time.sleep(1)
-            sent = sock.send(data.outb)  # Should be ready to write
-            data.outb = data.outb[sent:]
+            # print(f"Sending {data.outb!r} to {data.addr}")
+            print(f"Sending msg to {data.addr}")
+            # time.sleep(1)
+            sock.sendall(data.outb)
+            data.outb = b""
+            # try:
+            #     sent = sock.send(data.outb)  # Should be ready to write
+            #     data.outb = data.outb[sent:]
+            # except Exception as e:
+            #     data.outb = b""
+            #     print(type(e))
+            #     print(e)
 
     return ret
 
@@ -179,7 +226,7 @@ self_host, self_port = trusted_addrs[t_server_idx]
 
 other_t_servers = trusted_addrs.pop(t_server_idx)
 
-all_clients = {}    # {address_as_string: public_key}
+all_clients = {}    # {address_as_string: types.SimpleNamespace(listen_addr, public_key)}
 
 sel = selectors.DefaultSelector()
 
@@ -191,8 +238,8 @@ lsock.setblocking(False)
 sel.register(lsock, selectors.EVENT_READ, data=None)
 
 pnconfig = PNConfiguration()
-pnconfig.publish_key = 'demo'
-pnconfig.subscribe_key = 'demo'
+pnconfig.publish_key = "demo"
+pnconfig.subscribe_key = "demo"
 pnconfig.user_id = sys.argv[1]
 pnconfig.ssl = True
 pubnub = PubNub(pnconfig)
@@ -208,14 +255,20 @@ try:
         for key, mask in events:
             if key.data is None:
                 client_addr = acceptWrapper(key.fileobj)
-                all_clients[addressToLine(client_addr)] = None  # Store the client info as a string, and set the public key to `None` for now
-                msg_to_publish = generatePublishMessage({"action": "Joined", "command": None, "sender": client_addr})
+                sender = addressToLine(client_addr)
+                all_clients[sender] = None  # Store the client info as a string, and set the public key to `None` for now
+                msg_to_publish = generatePublishMessage({"action": "Joined", "command": None, "sender": sender})
                 publish(pubnub, channel, msg_to_publish, myPublishCallback)
             else:
                 res = serviceConnection(key, mask)
                 msg_to_publish = generatePublishMessage(res)
                 if msg_to_publish:
-                    publish(pubnub, channel, msg_to_publish, myPublishCallback)
+                    try:
+                        publish(pubnub, channel, msg_to_publish, myPublishCallback)
+                    except Exception as e:
+                        print("Not publishing")
+                        print(type(e))
+                        print(e)
 
         # # Other server stuff
         # time.sleep(0.1)

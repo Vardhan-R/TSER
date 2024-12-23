@@ -43,6 +43,21 @@ def choose(lst: list):
 
     return random.choice(lst)
 
+def decryptData(data: bytes, private_key: rsa.PrivateKey) -> str:
+    if data[-5:] != b" TSER":
+        raise Exception(f"TSER footer not found in {data}")
+
+    try:
+        response = ""
+        data = data[:-5]
+        while data:
+            response += rsa.decrypt(data[:256], private_key).decode()
+            data = data[256:]
+    except rsa.DecryptionError:
+        raise Exception("Error during decryption")
+
+    return response
+
 def framePathRequest(recipient: str) -> bytes:
     path_request = f"Contact {recipient}"
     return path_request.encode()
@@ -68,8 +83,8 @@ def startConnection(selector: selectors.DefaultSelector, recipient_address, conn
 
     return True
 
-self_host = sys.argv[1]
-self_port = int(sys.argv[2])
+self_listen_host = sys.argv[1]
+self_listen_port = int(sys.argv[2])
 
 # Get the trusted servers' addresses
 with open("./trusted_servers.txt", 'r') as fp:
@@ -82,34 +97,50 @@ t_server: tuple[str, int] = choose(trusted_addrs)
 
 self_public_key, self_private_key = rsa.newkeys(2048)
 
+# sel = selectors.DefaultSelector()
+
+# # For listening (to communicate with other clients)
+# lsock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+# lsock.bind((self_listen_host, self_listen_port))
+# lsock.listen()
+# print(f"Listening on {(self_listen_host, self_listen_port)}")
+# lsock.setblocking(False)
+# sel.register(lsock, selectors.EVENT_READ, data=None)
+
 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-    # Choose address of client
-    s.bind((self_host, self_port))
-    print((self_host, self_port))
+    # # Choose address of client
+    # s.bind((self_host, self_port))
+    print((self_listen_host, self_listen_port))
 
     # Connect to the chosen trusted server
     s.connect((t_server[0], t_server[1]))
+    print("Connected to the trusted server", (t_server[0], t_server[1]))
 
-    # Send the public key
+    # Send the listening address and the public key
     while True:
-        s.sendall(f"Sharing_public_key {self_public_key.n} {self_public_key.e}".encode())
-        data = s.recv(1024)
-        if data.decode() == "Received public key":
+        s.sendall(f"Sharing_basic_info {self_listen_host}:{self_listen_port} {self_public_key.n} {self_public_key.e}".encode())
+        data = s.recv(4096)
+        response = decryptData(data, self_private_key)
+        if response == "Received basic info":
             break
+        print(f"Incorrect data received: {data}")
+        print(f"Decoded as: {response}")
+        time.sleep(1)
 
-    while (recipient := input('Who do you want to contact: ')) != "exit":
+    while (recipient := input('Who do you want to contact? ')) != "exit":
         s.sendall(framePathRequest(recipient))
 
-        data = s.recv(1024)
-        response = data.decode()
+        data = s.recv(4096)
+        response = decryptData(data, self_private_key)
         print(response)
 
-        if response not in ("Address not found", "No intermediate nodes"):
+        if response not in ("Address not found", "No intermediate nodes", "Error while generating reponse"):
             # Create the path
             lft, rgt = response.split('|')
             intermediate_nodes = lft.split(' ')
             public_keys = [rsa.PublicKey(*map(int, s.split(','))) for s in rgt.split(' ')]
             path = TSERPath(recipient, intermediate_nodes, public_keys)
+            print("Path registered")
 
             break   # To do: replace with a multi-threaded solution
 

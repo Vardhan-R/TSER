@@ -1,7 +1,7 @@
 # Start the 3 trusted servers
 for ($server_idx = 0; $server_idx -lt 3; $server_idx++) {
-    # Start-Process cmd -ArgumentList "/c py trusted_server.py $server_idx"
-    Start-Process powershell -ArgumentList "-noexit", "/c py trusted_server.py $server_idx"
+    Start-Process cmd -ArgumentList "/c py trusted_server.py $server_idx"
+    # Start-Process powershell -ArgumentList "-noexit", "/c py trusted_server.py $server_idx"
 }
 
 # Give some time for the servers to subscribe and start listening
